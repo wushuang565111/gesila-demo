@@ -9,12 +9,51 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const distDir = path.join(__dirname, 'dist')
 const port = Number(process.env.PORT || 5000)
 const publicUrl = (process.env.PUBLIC_URL || '').replace(/\/+$/, '') || null
+const dataDir = process.env.DATA_DIR || path.join(__dirname, 'data')
+
+// 确保持久化目录存在
+const audioDir = path.join(dataDir, 'audio')
+const sharesDir = path.join(dataDir, 'shares')
+fs.mkdirSync(audioDir, { recursive: true })
+fs.mkdirSync(sharesDir, { recursive: true })
 
 let tunnelUrl = null
 let tunnelStatus = 'starting'
 let tunnelMessage = '公网链接生成中...'
 const songShares = new Map()
 const audioStore = new Map()
+
+// 启动时从磁盘恢复数据
+function loadPersistedData() {
+  try {
+    for (const file of fs.readdirSync(audioDir)) {
+      if (file.endsWith('.audio')) {
+        const id = file.replace('.audio', '')
+        const metaPath = path.join(audioDir, `${id}.meta.json`)
+        const dataPath = path.join(audioDir, file)
+        if (fs.existsSync(metaPath) && fs.existsSync(dataPath)) {
+          const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'))
+          audioStore.set(id, {
+            _filePath: dataPath,
+            type: meta.type || 'audio/mpeg',
+            createdAt: meta.createdAt || Date.now()
+          })
+        }
+      }
+    }
+    for (const file of fs.readdirSync(sharesDir)) {
+      if (file.endsWith('.json')) {
+        const id = file.replace('.json', '')
+        const record = JSON.parse(fs.readFileSync(path.join(sharesDir, file), 'utf-8'))
+        songShares.set(id, record)
+      }
+    }
+    console.log(`[data] restored ${audioStore.size} audio files, ${songShares.size} song shares from ${dataDir}`)
+  } catch (e) {
+    console.error('[data] failed to restore persisted data:', e.message)
+  }
+}
+loadPersistedData()
 
 function deriveBaseUrl(req) {
   if (publicUrl) return publicUrl
@@ -23,11 +62,17 @@ function deriveBaseUrl(req) {
   return `${proto}://${host}`
 }
 
-// 清理超过 1 小时的音频缓存
+// 清理超过 1 小时的音频缓存（内存 + 磁盘）
 setInterval(() => {
   const cutoff = Date.now() - 3600000
   for (const [id, entry] of audioStore) {
-    if (entry.createdAt < cutoff) audioStore.delete(id)
+    if (entry.createdAt < cutoff) {
+      const fp = entry._filePath || path.join(audioDir, `${id}.audio`)
+      const mp = path.join(audioDir, `${id}.meta.json`)
+      try { fs.unlinkSync(fp) } catch (_) {}
+      try { fs.unlinkSync(mp) } catch (_) {}
+      audioStore.delete(id)
+    }
   }
 }, 600000)
 
@@ -201,7 +246,18 @@ const server = http.createServer(async (req, res) => {
         sendBadRequest(res, '音频文件过大（最大 15MB）')
         return
       }
-      audioStore.set(id, { data, type: req.headers['x-audio-type'] || 'audio/mpeg', createdAt: Date.now() })
+      const audioType = req.headers['x-audio-type'] || 'audio/mpeg'
+      const createdAt = Date.now()
+      // 写入磁盘持久化
+      const filePath = path.join(audioDir, `${id}.audio`)
+      const metaPath = path.join(audioDir, `${id}.meta.json`)
+      try {
+        fs.writeFileSync(filePath, data)
+        fs.writeFileSync(metaPath, JSON.stringify({ type: audioType, createdAt }))
+      } catch (e) {
+        console.error('[audio] failed to persist:', e.message)
+      }
+      audioStore.set(id, { _filePath: filePath, type: audioType, createdAt })
       sendJson(res, { audioId: id })
     })
     return
@@ -212,8 +268,10 @@ const server = http.createServer(async (req, res) => {
   if (audioMatch && req.method === 'GET') {
     const entry = audioStore.get(audioMatch[1])
     if (!entry) { sendNotFound(res, 'Audio not found'); return }
+    const audioData = entry.data || (entry._filePath && fs.existsSync(entry._filePath) ? fs.readFileSync(entry._filePath) : null)
+    if (!audioData) { sendNotFound(res, 'Audio data missing'); return }
     res.writeHead(200, { 'Content-Type': entry.type, 'Cache-Control': 'public, max-age=3600', 'Access-Control-Allow-Origin': '*' })
-    res.end(entry.data)
+    res.end(audioData)
     return
   }
 
@@ -226,7 +284,14 @@ const server = http.createServer(async (req, res) => {
         return
       }
       const id = makeSongShareId()
-      songShares.set(id, { token, createdAt: Date.now() })
+      const record = { token, createdAt: Date.now() }
+      songShares.set(id, record)
+      // 持久化到磁盘
+      try {
+        fs.writeFileSync(path.join(sharesDir, `${id}.json`), JSON.stringify(record))
+      } catch (e) {
+        console.error('[share] failed to persist:', e.message)
+      }
       sendJson(res, {
         ready: !!tunnelUrl || process.env.DISABLE_TUNNEL === '1',
         id,
