@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import QRCode from 'qrcode'
 
 export function WaveformPlayer({ player, seed, styleName, compact }) {
@@ -45,15 +45,19 @@ export function WaveformPlayer({ player, seed, styleName, compact }) {
 
 export function QRBox({ text, size = 168 }) {
   const canvasRef = useRef(null)
+  const [error, setError] = useState(false)
   useEffect(() => {
     if (canvasRef.current && text) {
+      setError(false)
       QRCode.toCanvas(canvasRef.current, text, {
         width: size,
         margin: 1,
+        errorCorrectionLevel: 'M',
         color: { dark: '#12121a', light: '#ffffff' }
-      }).catch(() => {})
+      }).catch(() => { setError(true) })
     }
   }, [text, size])
+  if (error) return <div style={{ width: size, height: size, display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#fff', borderRadius: 12, color: '#999', fontSize: 13 }}>二维码生成失败<br/>请用复制链接</div>
   return <canvas ref={canvasRef} className="qr" width={size} height={size} />
 }
 
