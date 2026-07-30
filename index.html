@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <meta name="theme-color" content="#0b0b12" />
+    <title>歌斯拉 · AI词曲Demo创作</title>
+    <style>
+      /* 分享弹窗（独立于 React 应用），入口按钮由 React TopBar 渲染。 */
+      .share-overlay {
+        position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+        background: rgba(0,0,0,0.6); display: flex; align-items: center;
+        justify-content: center; z-index: 1000;
+        opacity: 0; pointer-events: none; transition: opacity 0.3s;
+        backdrop-filter: blur(4px);
+      }
+      .share-overlay.show { opacity: 1; pointer-events: all; }
+      .share-modal {
+        background: #1a1a2e; border: 1px solid #2d2d4a; border-radius: 16px;
+        padding: 32px; text-align: center; max-width: 400px; width: 90%;
+      }
+      .share-modal h3 { font-size: 1.1rem; margin-bottom: 6px; color: #f0f0f5; }
+      .share-modal .url-box {
+        background: #0d0d20; border: 1px solid #2d2d4a; border-radius: 8px;
+        padding: 12px; margin: 16px 0; font-size: 0.8rem; word-break: break-all;
+        font-family: "Consolas",monospace; color: #7c3aed;
+      }
+      .share-modal button {
+        padding: 10px 24px; border-radius: 10px; border: none; cursor: pointer;
+        font-size: 0.85rem; font-family: inherit; margin: 4px;
+      }
+      .share-modal .btn-copy { background: #7c3aed; color: #fff; }
+      .share-modal .btn-close { background: transparent; border: 1px solid #2d2d4a; color: #8b8ba8; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+
+    <!-- 分享弹窗 -->
+    <div class="share-overlay" id="shareOverlay" onclick="if(event.target===this)closeShare()">
+      <div class="share-modal">
+        <h3>🔗 分享歌斯拉</h3>
+        <p style="color:#8b8ba8;font-size:0.85rem;margin-top:4px">扫二维码或复制链接发给朋友</p>
+        <div id="qrCode" style="margin:12px 0"><span style="color:#5a5a78">加载中...</span></div>
+        <div class="url-box" id="shareUrl">获取链接中...</div>
+        <button class="btn-copy" onclick="copyShareUrl()">📋 复制链接</button>
+        <button class="btn-close" onclick="closeShare()">关闭</button>
+      </div>
+    </div>
+
+    <script>
+      // 分享服务地址：优先当前源（server.py/share-server.js 直接托管），回落到本机 5000 端口。
+      var SHARE_ENDPOINTS = ['', 'http://localhost:5000'];
+      var shareApiBase = null;
+      var sharePollTimer = null;
+
+      async function fetchShare() {
+        for (var i = 0; i < SHARE_ENDPOINTS.length; i++) {
+          var base = SHARE_ENDPOINTS[i];
+          try {
+            var r = await fetch(base + '/api/share', { cache: 'no-store' });
+            if (r.ok) {
+              var d = await r.json();
+              shareApiBase = base;
+              return d;
+            }
+          } catch (e) { /* 尝试下一个地址 */ }
+        }
+        return null;
+      }
+
+      function renderShare(d) {
+        var urlEl = document.getElementById('shareUrl');
+        var qrEl = document.getElementById('qrCode');
+        if (d && d.ready && d.url) {
+          urlEl.textContent = d.url;
+          qrEl.innerHTML =
+            '<img src="' + shareApiBase + '/api/qrcode?url=' + encodeURIComponent(d.url) +
+            '" width="180" height="180" style="border-radius:8px">';
+          return true;
+        }
+        urlEl.textContent = (d && d.message) ? d.message : '链接生成中...';
+        qrEl.innerHTML = '<span style="color:#5a5a78">加载中...</span>';
+        return false;
+      }
+
+      async function refreshShare() {
+        var d = await fetchShare();
+        if (!d) {
+          document.getElementById('shareUrl').textContent =
+            '未连接分享服务：请先运行 python server.py（或 npm run share）';
+          document.getElementById('qrCode').innerHTML =
+            '<span style="color:#5a5a78">分享服务未启动</span>';
+          return false;
+        }
+        var ready = renderShare(d);
+        if (ready && sharePollTimer) { clearInterval(sharePollTimer); sharePollTimer = null; }
+        return ready;
+      }
+
+      function openShare() {
+        document.getElementById('shareOverlay').classList.add('show');
+        refreshShare();
+        if (!sharePollTimer) sharePollTimer = setInterval(refreshShare, 3000);
+      }
+      function closeShare() {
+        document.getElementById('shareOverlay').classList.remove('show');
+        if (sharePollTimer) { clearInterval(sharePollTimer); sharePollTimer = null; }
+      }
+      function copyShareUrl() {
+        var t = document.getElementById('shareUrl').textContent;
+        navigator.clipboard.writeText(t).then(function () { alert('链接已复制！'); })
+          .catch(function () { prompt('手动复制：', t); });
+      }
+    </script>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
