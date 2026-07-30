@@ -12,6 +12,6 @@ RUN npm ci --production && npm cache clean --force
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/share-server.js ./
 ENV DISABLE_TUNNEL=1
-ENV PORT=5000
-EXPOSE 5000
+ENV PORT=8080
+EXPOSE 8080
 CMD ["node", "share-server.js"]
