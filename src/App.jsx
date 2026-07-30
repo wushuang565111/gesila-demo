@@ -2071,18 +2071,93 @@ function SongMoodGif({ styleName, emotion, fullSong }) {
 }
 
 function ShareModal({ project, demo, onClose }) {
-  const payload = {
-    t: project.title, s: demo.seed, st: demo.styleName,
-    l: demo.lyrics, th: demo.theme, v: demo.version
-  }
-  const token = encodeShare(payload)
-  // shareUrl 自动适配当前域名：本地=localhost，部署到 Sealos=公网域名
-  const shareLink = shareUrl(token)
+  const shareLyrics = demo.lyrics.split('\n').filter(Boolean).slice(0, 8).join('\n')
+  const [shareUrl2, setShareUrl2] = useState('')
+  const [loading, setLoading] = useState(true)
+  const [statusText, setStatusText] = useState('正在生成分享链接…')
   const [copied, setCopied] = useState(false)
-  const isPublic = !window.location.hostname.includes('localhost') && !window.location.hostname.includes('127.0.0.1')
+
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+    setStatusText('正在生成分享链接…')
+
+    // 异步收集音频数据
+    const prepareShare = async () => {
+      const payload = {
+        t: project.title, s: demo.seed, st: demo.styleName,
+        l: shareLyrics, th: demo.theme, v: demo.version
+      }
+
+      // 尝试上传 AI 音频（伴奏优先，完整歌曲次之）
+      try {
+        const instRecord = await loadInstrumentalAudio(demo.id)
+        if (instRecord?.blob && instRecord.blob.size > 0) {
+          setStatusText('正在上传 AI 伴奏…')
+          const formData = new FormData()
+          formData.append('audio', instRecord.blob, 'inst.mp3')
+          const resp = await fetch('/api/audio-upload', {
+            method: 'POST',
+            headers: { 'X-Audio-Type': 'audio/mpeg' },
+            body: instRecord.blob
+          })
+          if (resp.ok) {
+            const { audioId } = await resp.json()
+            payload.ai = audioId
+            payload.aiType = 'instrumental'
+          }
+        }
+      } catch {}
+
+      try {
+        const songRecord = await loadSongAudio(demo.id)
+        if (songRecord?.blob && songRecord.blob.size > 0) {
+          setStatusText('正在上传完整歌曲…')
+          const resp = await fetch('/api/audio-upload', {
+            method: 'POST',
+            headers: { 'X-Audio-Type': 'audio/mpeg' },
+            body: songRecord.blob
+          })
+          if (resp.ok) {
+            const { audioId } = await resp.json()
+            payload.ai = audioId
+            payload.aiType = 'fullsong'
+          }
+        }
+      } catch {}
+
+      const token = encodeShare(payload)
+      const localUrl = shareUrl(token)
+
+      // 尝试生成 sid 短链接（优先使用 shareApiBase，加重试）
+      const apiBase = (typeof window !== 'undefined' && window.shareApiBase) || ''
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          if (attempt > 0) setStatusText(`正在生成短链接…(${attempt + 1}/3)`)
+          const r = await fetch(apiBase + '/api/song-share', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ token })
+          })
+          if (r.ok) {
+            const data = await r.json()
+            if (!cancelled && data.url) { setShareUrl2(data.url); setLoading(false); return }
+          }
+        } catch (e) {
+          console.error('song-share attempt', attempt + 1, 'failed:', e.message || e)
+          if (attempt < 2) await new Promise(r => setTimeout(r, 800))
+        }
+      }
+
+      if (!cancelled) { setShareUrl2(localUrl); setLoading(false) }
+    }
+
+    prepareShare()
+    return () => { cancelled = true }
+  }, [demo.id])
 
   const copy = async () => {
-    try { await navigator.clipboard.writeText(shareLink); setCopied(true); setTimeout(() => setCopied(false), 1600) }
+    try { await navigator.clipboard.writeText(shareUrl2); setCopied(true); setTimeout(() => setCopied(false), 1600) }
     catch { setCopied(false) }
   }
 
@@ -2093,18 +2168,19 @@ function ShareModal({ project, demo, onClose }) {
         <h2>🔗 分享「{project.title}」</h2>
         <p className="song-share-subtitle">扫码或复制链接发给朋友试听</p>
         <div className="song-share-qr-wrap">
-          <div className="qr-center">
-            <QRBox text={shareLink} size={220} />
-          </div>
+          {loading ? (
+            <div className="song-share-qr-pending">{statusText}</div>
+          ) : (
+            <div className="qr-center">
+              <QRBox text={shareUrl2} size={220} />
+            </div>
+          )}
         </div>
-        <input className="song-share-url-box" readOnly value={shareLink} onFocus={e => e.target.select()} />
+        <input className="song-share-url-box" readOnly value={shareUrl2 || '生成中…'} onFocus={e => e.target.select()} />
         <div className="song-share-actions">
-          <button className="btn-primary" onClick={copy}>{copied ? '已复制 ✓' : '📋 复制链接'}</button>
+          <button className="btn-primary" onClick={copy} disabled={loading}>{copied ? '已复制 ✓' : '📋 复制链接'}</button>
           <button className="btn-ghost" onClick={onClose}>关闭</button>
         </div>
-        {!isPublic && (
-          <p className="hint" style={{ marginTop: 10 }}>当前为本地链接。部署到 Sealos 后即为公网链接，任何人都能打开。</p>
-        )}
       </div>
     </div>
   )
@@ -2163,6 +2239,25 @@ function SharePage({ token, sid }) {
   }, [resolvedToken])
 
   const data = resolvedToken ? decodeShare(resolvedToken) : null
+  const [sharedAudioUrl, setSharedAudioUrl] = useState('')
+  const [sharedAudioType, setSharedAudioType] = useState('')
+
+  // 如果分享数据包含 AI 音频 ID，从 share-server 拉取
+  useEffect(() => {
+    if (!data?.ai || !resolvedToken) return
+    setSharedAudioUrl('')
+    fetch(`/api/audio/${encodeURIComponent(data.ai)}`)
+      .then(r => r.ok ? r.blob() : Promise.reject())
+      .then(blob => {
+        const url = URL.createObjectURL(blob)
+        setSharedAudioUrl(url)
+        setSharedAudioType(data.aiType || 'instrumental')
+      })
+      .catch(() => {})
+    return () => {
+      if (sharedAudioUrl) URL.revokeObjectURL(sharedAudioUrl)
+    }
+  }, [resolvedToken, data?.ai])
 
   if (resolveState === 'loading') {
     return <div className="page share-page"><div className="card"><h2>正在打开分享歌曲…</h2><p className="muted">正在读取歌曲短链接，请稍候。</p></div></div>
@@ -2189,8 +2284,18 @@ function SharePage({ token, sid }) {
       </div>
 
       <div className="card demo-card">
-        <WaveformPlayer player={player} seed={data.s} styleName={data.st} />
-        <button className="btn-ghost mt" onClick={() => player.exportWav(data.s, data.st, data.t + '.wav')}>⬇ 下载 WAV</button>
+        {sharedAudioUrl ? (
+          <>
+            <p className="player-label">{sharedAudioType === 'fullsong' ? 'AI 完整歌曲 · 人声演唱' : 'AI 伴奏 · MiniMax 生成'}</p>
+            <audio controls src={sharedAudioUrl} style={{ width: '100%', borderRadius: 8 }} />
+            <a className="btn-ghost mt" href={sharedAudioUrl} download={data.t + '.mp3'}>⬇ 下载 MP3</a>
+          </>
+        ) : (
+          <>
+            <WaveformPlayer player={player} seed={data.s} styleName={data.st} />
+            <button className="btn-ghost mt" onClick={() => player.exportWav(data.s, data.st, data.t + '.wav')}>⬇ 下载 WAV</button>
+          </>
+        )}
       </div>
 
       <div className="card">
