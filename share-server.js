@@ -8,11 +8,28 @@ import QRCode from 'qrcode'
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const distDir = path.join(__dirname, 'dist')
 const port = Number(process.env.PORT || 5000)
+const publicUrl = (process.env.PUBLIC_URL || '').replace(/\/+$/, '') || null
 
 let tunnelUrl = null
 let tunnelStatus = 'starting'
 let tunnelMessage = '公网链接生成中...'
 const songShares = new Map()
+const audioStore = new Map()
+
+function deriveBaseUrl(req) {
+  if (publicUrl) return publicUrl
+  const host = req.headers.host || `localhost:${port}`
+  const proto = host.startsWith('localhost') || host.startsWith('127.') ? 'http' : 'https'
+  return `${proto}://${host}`
+}
+
+// 清理超过 1 小时的音频缓存
+setInterval(() => {
+  const cutoff = Date.now() - 3600000
+  for (const [id, entry] of audioStore) {
+    if (entry.createdAt < cutoff) audioStore.delete(id)
+  }
+}, 600000)
 
 function startTunnel() {
   if (process.env.DISABLE_TUNNEL === '1') {
@@ -94,8 +111,8 @@ function makeSongShareId() {
   return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`
 }
 
-function buildSongShareUrl(id) {
-  const base = tunnelUrl || `http://localhost:${port}`
+function buildSongShareUrl(id, req) {
+  const base = tunnelUrl || deriveBaseUrl(req)
   return `${base.replace(/\/+$/, '')}/#/s?sid=${encodeURIComponent(id)}`
 }
 
@@ -149,17 +166,19 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (requestUrl.pathname === '/api/share') {
+    const isDisabled = process.env.DISABLE_TUNNEL === '1'
+    const base = isDisabled ? deriveBaseUrl(req) : tunnelUrl
     sendJson(res, {
-      ready: !!tunnelUrl,
-      url: tunnelUrl,
-      status: tunnelStatus,
-      message: tunnelMessage
+      ready: isDisabled || !!tunnelUrl,
+      url: isDisabled ? base : tunnelUrl,
+      status: isDisabled ? 'ready' : tunnelStatus,
+      message: isDisabled ? 'Sealos 部署模式，公网就绪' : tunnelMessage
     })
     return
   }
 
   if (requestUrl.pathname === '/api/qrcode') {
-    const url = requestUrl.searchParams.get('url') || tunnelUrl || ''
+    const url = requestUrl.searchParams.get('url') || tunnelUrl || deriveBaseUrl(req)
     if (!url) {
       res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' })
       res.end('No url')
@@ -168,6 +187,33 @@ const server = http.createServer(async (req, res) => {
     const png = await QRCode.toBuffer(url, { width: 220, margin: 1 })
     res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'no-store', 'Access-Control-Allow-Origin': '*' })
     res.end(png)
+    return
+  }
+
+  // 上传 AI 音频（伴奏/完整歌曲）
+  if (requestUrl.pathname === '/api/audio-upload' && req.method === 'POST') {
+    const chunks = []
+    req.on('data', chunk => chunks.push(chunk))
+    req.on('end', () => {
+      const id = makeSongShareId()
+      const data = Buffer.concat(chunks)
+      if (data.length > 15 * 1024 * 1024) {
+        sendBadRequest(res, '音频文件过大（最大 15MB）')
+        return
+      }
+      audioStore.set(id, { data, type: req.headers['x-audio-type'] || 'audio/mpeg', createdAt: Date.now() })
+      sendJson(res, { audioId: id })
+    })
+    return
+  }
+
+  // 获取上传的音频
+  const audioMatch = requestUrl.pathname.match(/^\/api\/audio\/([a-z0-9]+)$/i)
+  if (audioMatch && req.method === 'GET') {
+    const entry = audioStore.get(audioMatch[1])
+    if (!entry) { sendNotFound(res, 'Audio not found'); return }
+    res.writeHead(200, { 'Content-Type': entry.type, 'Cache-Control': 'public, max-age=3600', 'Access-Control-Allow-Origin': '*' })
+    res.end(entry.data)
     return
   }
 
@@ -182,11 +228,12 @@ const server = http.createServer(async (req, res) => {
       const id = makeSongShareId()
       songShares.set(id, { token, createdAt: Date.now() })
       sendJson(res, {
-        ready: !!tunnelUrl,
+        ready: !!tunnelUrl || process.env.DISABLE_TUNNEL === '1',
         id,
-        url: buildSongShareUrl(id),
+        url: buildSongShareUrl(id, req),
         status: tunnelStatus,
-        message: tunnelUrl ? '歌曲短分享链接已生成' : '已生成本机短链接，公网链接仍在生成中...'
+        message: tunnelUrl ? '歌曲短分享链接已生成'
+          : (process.env.DISABLE_TUNNEL === '1' ? '歌曲短分享链接已生成' : '已生成本机短链接，公网链接仍在生成中...')
       })
     } catch (error) {
       sendBadRequest(res, error.message || 'Invalid JSON')

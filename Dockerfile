@@ -1,5 +1,17 @@
-FROM nginx:alpine
-COPY dist /usr/share/nginx/html
-COPY nginx.conf /etc/nginx/conf.d/default.conf
-EXPOSE 80
-CMD ["nginx", "-g", "daemon off;"]
+FROM node:18-alpine AS build
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci
+COPY . .
+RUN npm run build
+
+FROM node:18-alpine AS runtime
+WORKDIR /app
+COPY --from=build /app/package*.json ./
+RUN npm ci --production && npm cache clean --force
+COPY --from=build /app/dist ./dist
+COPY --from=build /app/share-server.js ./
+ENV DISABLE_TUNNEL=1
+ENV PORT=5000
+EXPOSE 5000
+CMD ["node", "share-server.js"]
